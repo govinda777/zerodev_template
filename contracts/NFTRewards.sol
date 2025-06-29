@@ -3,134 +3,99 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Pausable.sol"; // Changed from ERC721Burnable as Pausable was intended
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
 
-contract NFTRewards is ERC721, ERC721URIStorage, ERC721Pausable, Ownable {
+contract NFTRewards is ERC721, ERC721URIStorage, Ownable, Pausable {
     using Counters for Counters.Counter;
     Counters.Counter private _tokenIdCounter;
 
-    // Mapping from token ID to rarity (example: 0 = Common, 1 = Rare, 2 = Epic)
-    // Making this public to allow easy querying of rarity.
-    mapping(uint256 => uint8) public tokenRarity;
+    // Mapping from token ID to rarity score or type
+    mapping(uint256 => string) public tokenRarity;
+    // Example: "Common", "Rare", "Epic"
 
-    // Base URI for off-chain metadata, if not set per token
-    string private _baseTokenURIInternal;
+    // Event for when a new NFT is minted with rarity
+    event NFTMintedWithRarity(
+        address indexed recipient,
+        uint256 indexed tokenId,
+        string tokenURI,
+        string rarity
+    );
 
-    // Allowed minter contracts/addresses (e.g., shop or staking pool)
-    mapping(address => bool) public allowedMinters;
-
-    event NFTMinted(address indexed recipient, uint256 indexed tokenId, string tokenURI, uint8 rarity);
-    event BaseURIUpdated(string newBaseURI);
-    event RaritySet(uint256 indexed tokenId, uint8 rarity);
-    event MinterStatusChanged(address indexed minter, bool isAllowed);
-
-    modifier onlyAllowedMinter() {
-        require(allowedMinters[msg.sender] || msg.sender == owner(), "Caller is not an allowed minter or owner");
-        _;
-    }
+    // Event for when rarity of an NFT is updated
+    event NFTRarityUpdated(uint256 indexed tokenId, string newRarity);
 
     constructor(
-        string memory name,     // e.g., "ZeroDev Reward NFT"
-        string memory symbol    // e.g., "ZDRN"
-    ) ERC721(name, symbol) Ownable(msg.sender) {
-        // Initialize counter if starting from 1 (Counters default to 0)
-        // _tokenIdCounter.increment(); // If you want token IDs to start from 1 and use current()
+        string memory name, // e.g., "ZeroDev Achievement NFT"
+        string memory symbol // e.g., "ZAN"
+    ) ERC721(name, symbol) Ownable(msg.sender) {}
+
+    function _baseURI() internal pure override returns (string memory) {
+        return "ipfs://"; // Placeholder, should be configured or updatable by owner
+        // Or return an empty string if token URIs are absolute.
     }
 
-    function _baseURI() internal view override returns (string memory) {
-        return _baseTokenURIInternal;
-    }
-
-    function setBaseURI(string memory newBaseURI) external onlyOwner {
-        _baseTokenURIInternal = newBaseURI;
-        emit BaseURIUpdated(newBaseURI);
-    }
-
-    function setMinterStatus(address minterAddress, bool isAllowed) external onlyOwner {
-        require(minterAddress != address(0), "Minter address cannot be zero");
-        allowedMinters[minterAddress] = isAllowed;
-        emit MinterStatusChanged(minterAddress, isAllowed);
-    }
-
-    // Mints an NFT to a recipient with a specific token URI and rarity
-    // Can be called by owner or an allowed minter contract
-    function safeMint(
-        address to,
-        string memory uri,
-        uint8 rarity // Example: 0 for Common, 1 for Rare, etc.
-    ) external onlyAllowedMinter {
-        _tokenIdCounter.increment(); // Increments first, so first token ID is 1
-        uint256 newTokenId = _tokenIdCounter.current();
-        _safeMint(to, newTokenId);
-        _setTokenURI(newTokenId, uri); // Set specific URI for this token
-        tokenRarity[newTokenId] = rarity;
-        emit NFTMinted(to, newTokenId, uri, rarity);
-    }
-
-    // Allows owner or allowed minter to set/update rarity if needed after minting
-    function setTokenRarity(uint256 tokenId, uint8 rarity) external onlyAllowedMinter {
-        require(_exists(tokenId), "ERC721Metadata: URI query for nonexistent token");
+    function safeMint(address to, string memory uri, string memory rarity)
+        public
+        onlyOwner // Or some other authorized role, e.g., a game contract
+        whenNotPaused
+    {
+        _tokenIdCounter.increment();
+        uint256 tokenId = _tokenIdCounter.current();
+        _safeMint(to, tokenId);
+        _setTokenURI(tokenId, uri);
         tokenRarity[tokenId] = rarity;
-        emit RaritySet(tokenId, rarity);
+        emit NFTMintedWithRarity(to, tokenId, uri, rarity);
     }
 
-    // Override _update, _increaseBalance for Pausable compatibility
-    function _update(address to, uint256 tokenId, address auth)
-        internal
-        override(ERC721, ERC721Pausable) // Specify both contracts being overridden
-        returns (address)
-    {
-        return super._update(to, tokenId, auth);
+    // Function to update the rarity of an existing NFT (e.g., if it evolves)
+    function setTokenRarity(uint256 tokenId, string memory newRarity) public onlyOwner whenNotPaused {
+        require(_exists(tokenId), "ERC721Metadata: URI query for nonexistent token");
+        tokenRarity[tokenId] = newRarity;
+        emit NFTRarityUpdated(tokenId, newRarity);
     }
 
-    function _increaseBalance(address account, uint128 amount)
-        internal
-        override(ERC721, ERC721Pausable) // Specify both contracts being overridden
-    {
-        super._increaseBalance(account, amount);
+    // Function to update the token URI of an existing NFT
+    function setTokenURI(uint256 tokenId, string memory newURI) public onlyOwner whenNotPaused {
+        require(_exists(tokenId), "ERC721Metadata: URI query for nonexistent token");
+        _setTokenURI(tokenId, newURI);
+        // Note: ERC721URIStorage emits _URIUpdate event automatically
     }
 
-    // Override tokenURI to use ERC721URIStorage's version
+    // Required overrides for ERC721URIStorage
+    function _burn(uint256 tokenId) internal override(ERC721, ERC721URIStorage) whenNotPaused {
+        super._burn(tokenId);
+    }
+
     function tokenURI(uint256 tokenId)
         public
         view
-        override(ERC721, ERC721URIStorage) // Specify both
+        override(ERC721, ERC721URIStorage)
         returns (string memory)
     {
-        require(_exists(tokenId), "ERC721URIStorage: URI query for nonexistent token");
         return super.tokenURI(tokenId);
     }
 
-    // Override supportsInterface for ERC721URIStorage
     function supportsInterface(bytes4 interfaceId)
         public
         view
-        override(ERC721, ERC721URIStorage) // Specify both
+        override(ERC721, ERC721URIStorage)
         returns (bool)
     {
         return super.supportsInterface(interfaceId);
     }
 
-    function pause() external onlyOwner {
+    function pauseContract() external onlyOwner {
         _pause();
     }
 
-    function unpause() external onlyOwner {
+    function unpauseContract() external onlyOwner {
         _unpause();
     }
 
-    // Override _burn to ensure compatibility with ERC721URIStorage
-    function _burn(uint256 tokenId) internal override(ERC721, ERC721URIStorage) {
-        super._burn(tokenId);
-    }
-
-    // Function for users to burn their own tokens
-    function burn(uint256 tokenId) external {
-        // require(_isApprovedOrOwner(msg.sender, tokenId), "ERC721Burnable: caller is not owner nor approved");
-        // _isApprovedOrOwner is internal, so we check ownership directly or via approval
-        require(ownerOf(tokenId) == msg.sender || getApproved(tokenId) == msg.sender || isApprovedForAll(ownerOf(tokenId), msg.sender), "Caller is not owner nor approved");
-        _burn(tokenId);
+    // Utility to get current token ID (e.g., for UI or scripts to know next ID)
+    function getCurrentTokenId() external view returns (uint256) {
+        return _tokenIdCounter.current();
     }
 }

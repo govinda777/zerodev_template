@@ -1,17 +1,19 @@
 import { HardhatUserConfig } from "hardhat/config";
-import "@nomicfoundation/hardhat-toolbox";
-import "@nomicfoundation/hardhat-verify";
 import "dotenv/config";
-import "solidity-coverage";
-// import "hardhat-gas-reporter"; // Uncomment if needed
 
-const SEPOLIA_RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || "https://sepolia.infura.io/v3/YOUR_KEY";
-const PRIVATE_KEY = process.env.PRIVATE_KEY || "0x";
-const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY || "";
+// Minimal imports - let's see if toolbox was the issue
+// We need typechain for generating types, and a way for hardhat to find solidity files.
+// Hardhat's core compile task should handle Solidity without needing a specific plugin for that.
+// However, to use ethers.js related features in tests/scripts, we'd need @nomicfoundation/hardhat-ethers.
+// For now, let's focus on pure compilation.
+import "@typechain/hardhat"; // For TypeChain integration
+// The Solidity compilation capability is built into Hardhat; specific plugins like
+// @nomicfoundation/hardhat-solc or similar are not usually needed explicitly unless
+// using very custom solc versions or configurations.
 
 const config: HardhatUserConfig = {
   solidity: {
-    version: "0.8.24", // Pinning to a specific version like 0.8.20 or higher as per prompt
+    version: "0.8.24",
     settings: {
       optimizer: {
         enabled: true,
@@ -19,43 +21,23 @@ const config: HardhatUserConfig = {
       },
     },
   },
-  defaultNetwork: "hardhat",
   networks: {
-    hardhat: {
-      chainId: 31337,
-      // allowUnlimitedContractSize: true, // Uncomment if needed for very large contracts
-    },
-    localhost: {
-      chainId: 31337,
-      url: "http://127.0.0.1:8545/",
-      // accounts: [PRIVATE_KEY], // Optional: if you want to use a specific account
-    },
-    sepolia: {
-      url: SEPOLIA_RPC_URL,
-      accounts: PRIVATE_KEY !== "0x" ? [PRIVATE_KEY] : [],
-      chainId: 11155111,
-    },
+    hardhat: {},
   },
-  etherscan: {
-    apiKey: {
-      sepolia: ETHERSCAN_API_KEY,
-    },
-  },
-  gasReporter: { // Optional: uncomment and configure if needed
-    enabled: process.env.REPORT_GAS !== undefined,
-    currency: "USD",
-    outputFile: "gas-report.txt",
-    noColors: true,
-    // coinmarketcap: process.env.COINMARKETCAP_API_KEY, // Optional
-  },
+  // gasReporter can be removed if it's causing issues, but unlikely for discovery.
+  // gasReporter: {
+  //   enabled: process.env.REPORT_GAS === "true",
+  //   currency: "USD",
+  // },
   paths: {
-    sources: "./contracts",
+    sources: "./contracts", // This is the crucial line
     tests: "./test",
-    cache: "./cache_hardhat", // Renamed from ./cache to avoid conflict with Next.js
+    cache: "./cache",
     artifacts: "./artifacts",
   },
-  mocha: {
-    timeout: 40000, // 40 seconds
+  typechain: {
+    outDir: "src/types/typechain",
+    target: "ethers-v6",
   },
 };
 

@@ -15,24 +15,22 @@ contract TokenShop is Ownable, ReentrancyGuard, Pausable {
         string description;
         uint256 price;
         uint256 stock;
-        bool isActive; // Renamed from 'active' for clarity
+        bool active;
     }
 
     mapping(uint256 => Product) public products;
-    mapping(address => mapping(uint256 => uint256)) public purchases; // user => productId => quantity
+    mapping(address => mapping(uint256 => uint256)) public purchases; // buyer => productId => quantity
 
     uint256 public nextProductId = 1;
-    uint256 public totalRevenueCollected; // Renamed from totalRevenue for clarity
+    uint256 public totalRevenue; // In token units
 
-    event ProductAdded(uint256 indexed productId, string name, uint256 price, uint256 initialStock);
-    event ProductUpdated(uint256 indexed productId, string name, uint256 price, uint256 stock, bool isActive);
+    event ProductAdded(uint256 indexed productId, string name, uint256 price, uint256 stock);
+    event ProductUpdated(uint256 indexed productId, string name, uint256 price, uint256 stock, bool active);
     event ProductPurchased(address indexed buyer, uint256 indexed productId, uint256 quantity, uint256 totalCost);
-    event ProductStockUpdated(uint256 indexed productId, uint256 newStock);
-    event RevenueWithdrawn(address indexed to, uint256 amount);
+    event RevenueWithdrawn(address indexed owner, uint256 amount);
 
-    constructor(address tokenAddress) Ownable(msg.sender) {
-        require(tokenAddress != address(0), "Token address cannot be zero");
-        token = IERC20(tokenAddress);
+    constructor(address _tokenAddress) Ownable(msg.sender) {
+        token = IERC20(_tokenAddress);
     }
 
     function addProduct(
@@ -41,16 +39,14 @@ contract TokenShop is Ownable, ReentrancyGuard, Pausable {
         uint256 price,
         uint256 stock
     ) external onlyOwner {
-        require(bytes(name).length > 0, "Product name cannot be empty");
-        require(price > 0, "Product price must be greater than zero");
-
+        require(price > 0, "Product price must be greater than 0");
         products[nextProductId] = Product({
             id: nextProductId,
             name: name,
             description: description,
             price: price,
             stock: stock,
-            isActive: true
+            active: true
         });
 
         emit ProductAdded(nextProductId, name, price, stock);
@@ -63,20 +59,19 @@ contract TokenShop is Ownable, ReentrancyGuard, Pausable {
         string memory description,
         uint256 price,
         uint256 stock,
-        bool isActive
+        bool active
     ) external onlyOwner {
         require(productId > 0 && productId < nextProductId, "Invalid product ID");
-        require(bytes(name).length > 0, "Product name cannot be empty");
-        require(price > 0, "Product price must be greater than zero");
-
+        require(price > 0, "Product price must be greater than 0");
         Product storage product = products[productId];
+
         product.name = name;
         product.description = description;
         product.price = price;
         product.stock = stock;
-        product.isActive = isActive;
+        product.active = active;
 
-        emit ProductUpdated(productId, name, price, stock, isActive);
+        emit ProductUpdated(productId, name, price, stock, active);
     }
 
     function purchaseProduct(uint256 productId, uint256 quantity)
@@ -84,51 +79,40 @@ contract TokenShop is Ownable, ReentrancyGuard, Pausable {
         nonReentrant
         whenNotPaused
     {
-        require(productId > 0 && productId < nextProductId, "Invalid product ID");
-        require(quantity > 0, "Quantity must be greater than zero");
-
+        require(quantity > 0, "Quantity must be greater than 0");
         Product storage product = products[productId];
-        require(product.isActive, "Product not active");
+        require(product.active, "Product not active");
         require(product.stock >= quantity, "Insufficient stock");
 
         uint256 totalCost = product.price * quantity;
-        // Check for overflow with totalCost, though less likely with typical ERC20 decimals and prices
-        require(totalCost / quantity == product.price, "Total cost calculation overflow");
-
-        uint256 allowance = token.allowance(msg.sender, address(this));
-        require(allowance >= totalCost, "Check token allowance");
+        // Check allowance first
+        require(token.allowance(msg.sender, address(this)) >= totalCost, "Token allowance insufficient");
         require(token.transferFrom(msg.sender, address(this), totalCost), "Payment failed");
 
         product.stock -= quantity;
         purchases[msg.sender][productId] += quantity;
-        totalRevenueCollected += totalCost;
+        totalRevenue += totalCost;
 
         emit ProductPurchased(msg.sender, productId, quantity, totalCost);
-        emit ProductStockUpdated(productId, product.stock);
     }
 
     function withdrawRevenue() external onlyOwner {
         uint256 balance = token.balanceOf(address(this));
         require(balance > 0, "No revenue to withdraw");
-        // To prevent withdrawing more than collected if other tokens are accidentally sent.
-        uint256 amountToWithdraw = balance < totalRevenueCollected ? balance : totalRevenueCollected;
-
-        require(token.transfer(owner(), amountToWithdraw), "Revenue transfer failed");
-        totalRevenueCollected -= amountToWithdraw; // Adjust collected revenue
-        emit RevenueWithdrawn(owner(), amountToWithdraw);
+        require(token.transfer(owner(), balance), "Transfer failed");
+        emit RevenueWithdrawn(owner(), balance);
     }
 
-    function pause() external onlyOwner {
-        _pause();
-    }
-
-    function unpause() external onlyOwner {
-        _unpause();
-    }
-
-    // View function to get product details
     function getProduct(uint256 productId) external view returns (Product memory) {
         require(productId > 0 && productId < nextProductId, "Invalid product ID");
         return products[productId];
+    }
+
+    function pauseShop() external onlyOwner {
+        _pause();
+    }
+
+    function unpauseShop() external onlyOwner {
+        _unpause();
     }
 }

@@ -6,157 +6,131 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol"; // Added Pausable
 
-contract StakingPool is Ownable, ReentrancyGuard, Pausable {
+contract StakingPool is Ownable, ReentrancyGuard, Pausable { // Added Pausable
     IERC20 public immutable stakingToken;
 
     struct StakeInfo {
-        uint256 amount;             // Amount of tokens staked
-        uint256 lastRewardUpdateTime; // Timestamp of the last reward calculation update for this user
-        uint256 rewardDebt;         // Stores the reward amount already accounted for (to prevent double claiming)
+        uint256 amount;
+        uint256 timestamp; // Last time rewards were calculated or stake was updated
+        // uint256 rewardDebt; // Removed as per simplified calculation
     }
 
     mapping(address => StakeInfo) public stakes;
+    mapping(address => uint256) public rewards; // Stores pending rewards
 
     uint256 public totalStaked;
-    uint256 public rewardRatePerSecond; // e.g., (1% per day) / (24 * 60 * 60 seconds) with appropriate precision
-    uint256 public constant REWARD_PRECISION = 10**18; // For reward calculations
-    uint256 public constant MIN_STAKE_AMOUNT = 1 * 10**18; // Minimum 1 token to stake (assuming 18 decimals)
+    uint256 public rewardRate; // e.g., 100 for 1% per day, 10 for 0.1% per day. Needs to be set by owner.
+    uint256 public constant REWARD_PRECISION = 10000; // For percentage calculations (e.g., 1% = 100/10000)
+    uint256 public constant TIME_UNIT = 1 days; // Rewards accrue per day
 
-    uint256 public accTokenPerShare; // Accumulated tokens per share, used for calculating rewards
-    uint256 public lastGlobalRewardUpdateTime; // Last time rewards were updated globally (e.g., when rewardRate changes or someone stakes/unstakes)
+    event Staked(address indexed user, uint256 amount);
+    event Unstaked(address indexed user, uint256 amount, uint256 rewardPaid);
+    event RewardsClaimed(address indexed user, uint256 reward);
+    event RewardRateChanged(uint256 newRate);
 
-    event Staked(address indexed user, uint256 amount, uint256 totalUserStake);
-    event Unstaked(address indexed user, uint256 amount, uint256 remainingUserStake);
-    event RewardsClaimed(address indexed user, uint256 rewardAmount);
-    event RewardRateUpdated(uint256 oldRate, uint256 newRate);
-
-    constructor(address _stakingTokenAddress, uint256 _initialRewardRatePerDayPercent) Ownable(msg.sender) {
-        require(_stakingTokenAddress != address(0), "Token address cannot be zero");
+    constructor(address _stakingTokenAddress, uint256 _initialRewardRate) Ownable(msg.sender) {
         stakingToken = IERC20(_stakingTokenAddress);
-        // Example: _initialRewardRatePerDayPercent = 100 for 1% per day (100 means 1.00%)
-        // Convert daily percentage to per second rate with precision
-        // (Rate / 100) * (1 / seconds_in_day) * PRECISION
-        // (Rate * PRECISION) / (100 * seconds_in_day)
-        rewardRatePerSecond = (_initialRewardRatePerDayPercent * REWARD_PRECISION) / (100 * 1 days);
-        lastGlobalRewardUpdateTime = block.timestamp;
+        rewardRate = _initialRewardRate;
     }
 
-    modifier updateReward(address user) {
-        _updateGlobalRewardAccumulation();
-        if (stakes[user].amount > 0) {
-            uint256 pending = (stakes[user].amount * accTokenPerShare / REWARD_PRECISION) - stakes[user].rewardDebt;
-            if (pending > 0) {
-                // Safe transfer for rewards accumulated so far, or credit them internally before proceeding
-                // For simplicity in this modifier, we'll just update the debt. Actual transfer in claimRewards.
-            }
-        }
-        stakes[user].rewardDebt = stakes[user].amount * accTokenPerShare / REWARD_PRECISION; // Update debt before state change
-        _;
+    function setRewardRate(uint256 _newRate) external onlyOwner {
+        rewardRate = _newRate;
+        emit RewardRateChanged(_newRate);
     }
 
-    function _updateGlobalRewardAccumulation() internal {
-        if (totalStaked == 0) {
-            lastGlobalRewardUpdateTime = block.timestamp;
-            return;
+    function _updateRewards(address user) internal {
+        if (stakes[user].amount == 0) return; // No stake, no rewards to update.
+
+        uint256 pending = calculatePendingRewards(user);
+        if (pending > 0) {
+            rewards[user] += pending;
         }
-        if (block.timestamp > lastGlobalRewardUpdateTime) {
-            uint256 timeDelta = block.timestamp - lastGlobalRewardUpdateTime;
-            uint256 reward = timeDelta * rewardRatePerSecond; // This is the reward per token
-            accTokenPerShare += (reward * REWARD_PRECISION) / totalStaked; // Careful with precision here
-        }
-        lastGlobalRewardUpdateTime = block.timestamp;
+        // Always update timestamp to prevent double counting for the same period in subsequent calls.
+        stakes[user].timestamp = block.timestamp;
     }
 
-    function stake(uint256 amount) external nonReentrant whenNotPaused updateReward(msg.sender) {
-        require(amount >= MIN_STAKE_AMOUNT, "Stake amount too small");
+    function stake(uint256 amount) external nonReentrant whenNotPaused {
+        require(amount > 0, "Cannot stake 0");
+
+        _updateRewards(msg.sender); // Update rewards before changing stake amount
 
         require(stakingToken.transferFrom(msg.sender, address(this), amount), "Token transfer failed");
 
         stakes[msg.sender].amount += amount;
+        // stakes[msg.sender].timestamp = block.timestamp; // Timestamp updated in _updateRewards
         totalStaked += amount;
 
-        emit Staked(msg.sender, amount, stakes[msg.sender].amount);
+        emit Staked(msg.sender, amount);
     }
 
-    function unstake(uint256 amount) external nonReentrant whenNotPaused updateReward(msg.sender) {
-        StakeInfo storage userStake = stakes[msg.sender];
-        require(userStake.amount > 0, "No tokens staked");
-        require(amount > 0, "Cannot unstake 0 tokens");
+    function unstake(uint256 amount) external nonReentrant whenNotPaused { // Typically whenNotPaused is not needed for unstake
+        require(stakes[msg.sender].amount >= amount, "Insufficient stake");
+        require(amount > 0, "Cannot unstake 0");
 
-        uint256 amountToUnstake = amount > userStake.amount ? userStake.amount : amount;
+        _updateRewards(msg.sender); // Calculate and store pending rewards before reducing stake
 
-        // Claim pending rewards before unstaking
-        claimRewardsInternal(msg.sender);
+        uint256 currentStake = stakes[msg.sender].amount;
+        stakes[msg.sender].amount -= amount;
+        totalStaked -= amount;
 
-        userStake.amount -= amountToUnstake;
-        totalStaked -= amountToUnstake;
+        uint256 rewardToPay = rewards[msg.sender];
+        rewards[msg.sender] = 0; // Reset pending rewards for the user
 
-        require(stakingToken.transfer(msg.sender, amountToUnstake), "Token transfer failed");
+        // Transfer staked amount + accumulated rewards
+        uint256 totalToTransfer = amount + rewardToPay;
 
-        emit Unstaked(msg.sender, amountToUnstake, userStake.amount);
+        // Ensure contract has enough tokens (staked amount + rewards)
+        // This check is important if rewards are minted or come from a separate pool.
+        // If rewards are just part of the stakingToken supply held by the contract,
+        // this check is implicitly handled by the transfer call.
+        // For this example, we assume rewards are paid from the contract's balance of stakingToken.
+        require(stakingToken.balanceOf(address(this)) >= totalToTransfer, "Contract insufficient balance for unstake + rewards");
+
+        require(stakingToken.transfer(msg.sender, totalToTransfer), "Token transfer failed");
+
+        emit Unstaked(msg.sender, amount, rewardToPay);
     }
 
     function claimRewards() external nonReentrant whenNotPaused {
-        claimRewardsInternal(msg.sender);
+        _updateRewards(msg.sender); // Calculate and store pending rewards
+
+        uint256 rewardToClaim = rewards[msg.sender];
+        require(rewardToClaim > 0, "No rewards to claim");
+
+        rewards[msg.sender] = 0; // Reset pending rewards
+
+        require(stakingToken.balanceOf(address(this)) >= rewardToClaim, "Contract insufficient balance for rewards");
+        require(stakingToken.transfer(msg.sender, rewardToClaim), "Reward transfer failed");
+
+        emit RewardsClaimed(msg.sender, rewardToClaim);
     }
 
-    function claimRewardsInternal(address user) internal {
-        _updateGlobalRewardAccumulation(); // Ensure accTokenPerShare is up-to-date
-        uint256 pendingReward = pendingRewards(user);
+    function calculatePendingRewards(address user) public view returns (uint256) {
+        StakeInfo memory stakeInfo = stakes[user];
+        if (stakeInfo.amount == 0 || stakeInfo.timestamp == 0) return 0; // No stake or never staked
+        if (stakeInfo.timestamp >= block.timestamp) return 0; // Timestamp is in the future or current, no rewards yet for this block
 
-        if (pendingReward > 0) {
-            stakes[user].rewardDebt = stakes[user].amount * accTokenPerShare / REWARD_PRECISION; // Update before transfer
-            // Ensure the contract has enough tokens to pay out rewards.
-            // This example assumes the staking pool itself holds the reward tokens.
-            // If rewards are funded externally, ensure balance is sufficient.
-            uint256 contractBalance = stakingToken.balanceOf(address(this));
-            uint256 actualRewardToTransfer = pendingReward > contractBalance - totalStaked ? contractBalance - totalStaked : pendingReward;
-            // We should only transfer if actualRewardToTransfer > 0 and it comes from a dedicated reward pool, not the staked capital.
-            // This basic model implies rewards are part of the totalStaked or funded to the contract.
-            // A more robust system would have a separate reward pool.
-
-            // For this example, let's assume rewards are minted or transferred to the pool by an admin.
-            // And the pool has enough balance.
-            if (actualRewardToTransfer > 0) {
-                 require(stakingToken.transfer(user, actualRewardToTransfer), "Reward transfer failed");
-                 emit RewardsClaimed(user, actualRewardToTransfer);
-            }
-        }
+        uint256 stakingDuration = block.timestamp - stakeInfo.timestamp;
+        // Rewards = amount * rate * duration / (precision * time_unit)
+        return (stakeInfo.amount * rewardRate * stakingDuration) / (REWARD_PRECISION * TIME_UNIT);
     }
 
-    function pendingRewards(address user) public view returns (uint256) {
-        StakeInfo memory userStake = stakes[user];
-        if (userStake.amount == 0) {
-            return 0;
-        }
-        uint256 currentAccTokenPerShare = accTokenPerShare;
-        if (totalStaked > 0 && block.timestamp > lastGlobalRewardUpdateTime) {
-             uint256 timeDelta = block.timestamp - lastGlobalRewardUpdateTime;
-             uint256 reward = timeDelta * rewardRatePerSecond;
-             currentAccTokenPerShare += (reward * REWARD_PRECISION) / totalStaked;
-        }
-        return (userStake.amount * currentAccTokenPerShare / REWARD_PRECISION) - userStake.rewardDebt;
+    // View function to see total pending rewards for a user (already accrued + newly calculated)
+    function getPendingRewards(address user) external view returns (uint256) {
+        return rewards[user] + calculatePendingRewards(user);
     }
 
-    function updateRewardRate(uint256 _newDailyRatePercent) external onlyOwner {
-        _updateGlobalRewardAccumulation(); // Process rewards up to this point with the old rate
-        uint256 oldRatePerSecond = rewardRatePerSecond;
-        rewardRatePerSecond = (_newDailyRatePercent * REWARD_PRECISION) / (100 * 1 days);
-        lastGlobalRewardUpdateTime = block.timestamp; // Reset timestamp for new rate calculations
-        emit RewardRateUpdated(oldRatePerSecond, rewardRatePerSecond);
+    // View function for user's stake details
+    function getStakeInfo(address user) external view returns (uint256 amount, uint256 timestamp) {
+        StakeInfo memory stakeData = stakes[user];
+        return (stakeData.amount, stakeData.timestamp);
     }
 
-    function getStakeInfo(address user) external view returns (uint256 amount, uint256 pending) {
-        amount = stakes[user].amount;
-        pending = pendingRewards(user);
-        return (amount, pending);
-    }
-
-    function pause() external onlyOwner {
+    function pauseStaking() external onlyOwner {
         _pause();
     }
 
-    function unpause() external onlyOwner {
+    function unpauseStaking() external onlyOwner {
         _unpause();
     }
 }

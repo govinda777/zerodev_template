@@ -4,99 +4,84 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./ZeroDevToken.sol"; // Assuming ZeroDevToken has minting capability accessible by faucet
 
-contract TokenFaucet is Ownable, Pausable, ReentrancyGuard {
-    IERC20 public token; // Made mutable to allow token update if necessary by owner
-    uint256 public withdrawalAmount; // Amount of tokens per claim
-    uint256 public cooldownTime;     // Cooldown period in seconds
+contract TokenFaucet is Ownable, Pausable {
+    ZeroDevToken public immutable token; // Use ZeroDevToken directly for minting
+    uint256 public dripAmount;
+    uint256 public cooldownPeriod;
 
-    mapping(address => uint256) public lastClaimTime; // User's last claim timestamp
+    mapping(address => uint256) public lastClaimedTimestamp;
 
     event TokensClaimed(address indexed recipient, uint256 amount);
-    event FaucetFunded(address indexed funder, uint256 amount);
-    event WithdrawalAmountUpdated(uint256 oldAmount, uint256 newAmount);
-    event CooldownTimeUpdated(uint256 oldTime, uint256 newTime);
-    event TokenAddressUpdated(address indexed oldToken, address indexed newToken);
+    event DripAmountChanged(uint256 newAmount);
+    event CooldownChanged(uint256 newCooldown);
 
     constructor(
-        address tokenAddress,
-        uint256 _initialWithdrawalAmount,
-        uint256 _initialCooldownTime
+        address _tokenAddress,
+        uint256 _dripAmount,
+        uint256 _cooldownPeriod
     ) Ownable(msg.sender) {
-        require(tokenAddress != address(0), "Token address cannot be zero");
-        require(_initialWithdrawalAmount > 0, "Withdrawal amount must be positive");
-        require(_initialCooldownTime > 0, "Cooldown time must be positive");
-
-        token = IERC20(tokenAddress);
-        withdrawalAmount = _initialWithdrawalAmount;
-        cooldownTime = _initialCooldownTime;
+        require(_tokenAddress != address(0), "Invalid token address");
+        token = ZeroDevToken(_tokenAddress); // Initialize with ZeroDevToken instance
+        dripAmount = _dripAmount;
+        cooldownPeriod = _cooldownPeriod;
     }
 
-    function requestTokens() external nonReentrant whenNotPaused {
-        require(block.timestamp >= lastClaimTime[msg.sender] + cooldownTime, "Cooldown period not over");
+    function requestTokens() external whenNotPaused {
+        require(block.timestamp >= lastClaimedTimestamp[msg.sender] + cooldownPeriod, "Cooldown active");
 
-        uint256 currentWithdrawalAmount = withdrawalAmount; // Use local variable for consistency in checks and transfer
-        uint256 contractBalance = token.balanceOf(address(this));
-        require(contractBalance >= currentWithdrawalAmount, "Faucet is empty or has insufficient funds");
+        lastClaimedTimestamp[msg.sender] = block.timestamp;
 
-        lastClaimTime[msg.sender] = block.timestamp;
-        require(token.transfer(msg.sender, currentWithdrawalAmount), "Token transfer failed");
-
-        emit TokensClaimed(msg.sender, currentWithdrawalAmount);
+        // The Faucet contract itself needs to be a minter on the ZeroDevToken contract
+        // or have tokens transferred to it that it can then dispense.
+        // Assuming Faucet is a minter:
+        try token.mint(msg.sender, dripAmount) {
+             emit TokensClaimed(msg.sender, dripAmount);
+        } catch {
+            revert("Faucet: Token minting failed. Ensure Faucet contract has minting rights or sufficient balance.");
+        }
     }
 
-    function fundFaucet(uint256 amount) external {
-        require(amount > 0, "Amount must be positive");
-        // Allow anyone to fund the faucet by transferring tokens to this contract's address.
-        // This function specifically uses transferFrom, implying the faucet contract needs approval.
-        // A simpler way for anyone to fund is just to send tokens to the faucet's address.
-        // If using this function, msg.sender must have approved the faucet contract to spend their tokens.
-        require(token.transferFrom(msg.sender, address(this), amount), "Token transfer for funding failed");
-        emit FaucetFunded(msg.sender, amount);
+    function setDripAmount(uint256 _newAmount) external onlyOwner {
+        require(_newAmount > 0, "Drip amount must be positive");
+        dripAmount = _newAmount;
+        emit DripAmountChanged(_newAmount);
     }
 
-    function withdrawExcessTokens(uint256 amount) external onlyOwner {
-        require(amount > 0, "Amount must be positive");
-        uint256 contractBalance = token.balanceOf(address(this));
-        require(contractBalance >= amount, "Insufficient balance to withdraw");
-        require(token.transfer(owner(), amount), "Withdrawal failed");
+    function setCooldownPeriod(uint256 _newCooldown) external onlyOwner {
+        // Consider adding a reasonable minimum cooldown if necessary
+        cooldownPeriod = _newCooldown;
+        emit CooldownChanged(_newCooldown);
     }
 
-    function setWithdrawalAmount(uint256 newAmount) external onlyOwner {
-        require(newAmount > 0, "Withdrawal amount must be positive");
-        emit WithdrawalAmountUpdated(withdrawalAmount, newAmount);
-        withdrawalAmount = newAmount;
+    // Allow owner to withdraw any tokens accidentally sent to this contract
+    // (Only if these are not the tokens intended for dripping, e.g. another ERC20)
+    function withdrawOtherTokens(address _otherTokenAddress, uint256 _amount) external onlyOwner {
+        require(_otherTokenAddress != address(token), "Cannot withdraw faucet's primary token this way");
+        IERC20 otherToken = IERC20(_otherTokenAddress);
+        require(otherToken.transfer(owner(), _amount), "Withdraw failed");
     }
 
-    function setCooldownTime(uint256 newCooldown) external onlyOwner {
-        require(newCooldown > 0, "Cooldown time must be positive");
-        emit CooldownTimeUpdated(cooldownTime, newCooldown);
-        cooldownTime = newCooldown;
+    // In case the Faucet is not a minter but holds tokens to dispense
+    // The owner would need to fund this contract with ZeroDevToken
+    function fundFaucet(uint256 _amount) external {
+        // This function is if the faucet dispenses from its own balance rather than minting.
+        // Requires the sender to approve tokens to this contract first.
+        // For the current design (faucet as minter), this is not strictly needed for ZDT
+        // but could be useful if it were to dispense pre-minted tokens.
+        require(token.transferFrom(msg.sender, address(this), _amount), "Funding transfer failed");
     }
 
-    function setTokenAddress(address newTokenAddress) external onlyOwner {
-        require(newTokenAddress != address(0), "New token address cannot be zero");
-        emit TokenAddressUpdated(address(token), newTokenAddress);
-        token = IERC20(newTokenAddress);
-    }
-
-    function pause() external onlyOwner {
+    function pauseFaucet() external onlyOwner {
         _pause();
     }
 
-    function unpause() external onlyOwner {
+    function unpauseFaucet() external onlyOwner {
         _unpause();
     }
 
-    function getCooldownEndTime(address user) external view returns (uint256) {
-        if (lastClaimTime[user] == 0) { // Never claimed before
-             return 0; // Or block.timestamp, depending on desired UX for first-time claimers. 0 means can claim now.
-        }
-        return lastClaimTime[user] + cooldownTime;
-    }
-
-    function getFaucetDetails() external view returns (address tokenAddress, uint256 currentWithdrawalAmount, uint256 currentCooldownTime, uint256 faucetBalance) {
-        return (address(token), withdrawalAmount, cooldownTime, token.balanceOf(address(this)));
+    function canClaim(address _user) external view returns (bool) {
+        return block.timestamp >= lastClaimedTimestamp[_user] + cooldownPeriod;
     }
 }

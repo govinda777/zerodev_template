@@ -29,13 +29,11 @@ contract ZeroDevToken is ERC20, Ownable, Pausable {
     }
 
     function addMinter(address minter) external onlyOwner {
-        require(minter != address(0), "Zero address cannot be a minter");
         minters[minter] = true;
         emit MinterAdded(minter);
     }
 
     function removeMinter(address minter) external onlyOwner {
-        require(minter != address(0), "Zero address cannot be a minter");
         minters[minter] = false;
         emit MinterRemoved(minter);
     }
@@ -46,22 +44,5 @@ contract ZeroDevToken is ERC20, Ownable, Pausable {
 
     function unpause() external onlyOwner {
         _unpause();
-    }
-
-    // Function to allow owner to burn their own tokens
-    function burn(uint256 amount) external {
-        _burn(msg.sender, amount);
-    }
-
-    // Function to allow approved spenders to burn tokens from an owner's account
-    // Consistent with ERC20.sol's burnFrom
-    function burnFrom(address account, uint256 amount) external {
-        _spendAllowance(account, msg.sender, amount);
-        _burn(account, amount);
-    }
-
-    // Override _update to include Pausable functionality for transfers
-    function _update(address from, address to, uint256 value) internal virtual override whenNotPaused {
-        super._update(from, to, value);
     }
 }
