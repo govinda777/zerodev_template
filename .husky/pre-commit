@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+echo "Running pre-commit hook..."
+npm run lint # Example: run linter
+# Add other pre-commit checks here, like `npm test` if desired
+# exit 1 # To prevent commit if checks fail
+echo "Pre-commit checks passed."
+exit 0
