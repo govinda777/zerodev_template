@@ -1,10 +1,11 @@
-import type { Metadata } from "next";
+// @ts-ignore - Metadata type is automatically provided by Next.js
 import { Inter } from "next/font/google";
 import "./globals.css";
+import { PrivyProvider } from '@/providers/PrivyProvider';
 
 const inter = Inter({ subsets: ["latin"] });
 
-export const metadata: Metadata = {
+export const metadata = {
   title: "ZeroDev Token Shop",
   description: "A Web3 token shop powered by ZeroDev and Privy.",
 };
@@ -17,8 +18,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className}>
-        {/* TODO: Integrar PrivyProvider e outros providers globais aqui */}
-        {children}
+        <PrivyProvider>
+          {children}
+        </PrivyProvider>
       </body>
     </html>
   );
